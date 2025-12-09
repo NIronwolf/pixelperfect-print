@@ -38,7 +38,7 @@ def _get_base_thumbnail(image):
     else:  # Portrait or Square
         target_height = 1024
         target_width = int(1024 * img_aspect)
-    
+
     target_width = max(1, target_width)
     target_height = max(1, target_height)
 
@@ -74,8 +74,8 @@ def _get_zoomed_view(base_thumbnail, x_scale, y_scale, x_offset, y_offset):
     # 2. Calculate the panning offset from the slider
     pan_range_x = thumb_w * x_scale - thumb_w
     pan_range_y = thumb_h * y_scale - thumb_h
-    pan_offset_x = x_offset * pan_range_x
-    pan_offset_y = y_offset * pan_range_y
+    pan_offset_x = -x_offset * pan_range_x
+    pan_offset_y = -y_offset * pan_range_y
 
     # 3. Final offset is the sum
     final_offset_x = center_offset_x + pan_offset_x
@@ -97,15 +97,12 @@ def _get_zoomed_view(base_thumbnail, x_scale, y_scale, x_offset, y_offset):
     return zoomed_pixbuf
 
 
-def _draw_overlays(cr, config, thumb_w, thumb_h, dest_x, dest_y):
+def _draw_overlays(
+    cr, thumb_w, thumb_h, dest_x, dest_y, x_offset, y_offset, target_w_prop, target_h_prop
+):
     """
     Draws the dimming overlay and the dashed crop rectangle.
     """
-    target_w_prop = config.get_property("width")
-    target_h_prop = config.get_property("height")
-
-    if target_h_prop <= 0:
-        return
 
     target_aspect = target_w_prop / target_h_prop
     thumb_aspect = thumb_w / thumb_h
@@ -120,8 +117,8 @@ def _draw_overlays(cr, config, thumb_w, thumb_h, dest_x, dest_y):
     x_slop = thumb_w - crop_w
     y_slop = thumb_h - crop_h
 
-    crop_x = dest_x + x_slop / 2
-    crop_y = dest_y + y_slop / 2
+    crop_x = dest_x + (x_offset + 0.5) * x_slop
+    crop_y = dest_y + (y_offset + 0.5) * y_slop
 
     cr.set_source_rgba(0, 0, 0, 0.5)
     cr.rectangle(dest_x, dest_y, thumb_w, crop_y - dest_y)
@@ -304,35 +301,62 @@ def perfectfit_print_run(procedure, run_mode, image, drawables, config, data):
             cr.rectangle(0, 0, preview_width, preview_height)
             cr.fill()
 
-            # 1. Get a high-resolution base thumbnail (max 1024px)
             base_thumbnail = _get_base_thumbnail(image)
 
             if base_thumbnail:
-                # 2. Get slider values
                 x_scale = adj_x_scale.get_value()
                 y_scale = adj_y_scale.get_value()
                 x_offset = adj_x_offset.get_value()
                 y_offset = adj_y_offset.get_value()
 
-                # 3. Apply zoom and pan to create the final high-res view
                 final_thumbnail = _get_zoomed_view(
                     base_thumbnail, x_scale, y_scale, x_offset, y_offset
                 )
 
-                # 4. Scale the final view down to fit the actual drawing area
                 thumb_w = final_thumbnail.get_width()
                 thumb_h = final_thumbnail.get_height()
                 thumb_aspect = thumb_w / thumb_h
                 preview_aspect = preview_width / preview_height
 
                 if thumb_aspect > preview_aspect:
-                    display_w = preview_width
-                    display_h = int(display_w / thumb_aspect)
-                else:
                     display_h = preview_height
                     display_w = int(display_h * thumb_aspect)
+                else:
+                    display_w = preview_width
+                    display_h = int(display_w / thumb_aspect)
 
-                # Ensure dimensions are at least 1
+                display_w = int(display_w * x_scale)
+                display_h = int(display_h * y_scale)
+
+                # --- Constraint: Ensure Crop Rectangle is always visible ---
+                target_w_prop = config.get_property("width")
+                target_h_prop = config.get_property("height")
+
+                if target_h_prop > 0:
+                    target_aspect = target_w_prop / target_h_prop
+                    display_aspect = display_w / display_h if display_h > 0 else 0
+
+                    if display_aspect > 0:
+                        if target_aspect > display_aspect:
+                            predicted_crop_w = display_w
+                            predicted_crop_h = int(predicted_crop_w / target_aspect)
+                        else:
+                            predicted_crop_h = display_h
+                            predicted_crop_w = int(predicted_crop_h * target_aspect)
+
+                        scale_down_factor = 1.0
+                        if predicted_crop_w > preview_width:
+                            scale_down_factor = preview_width / predicted_crop_w
+                        if predicted_crop_h > preview_height:
+                            scale_down_factor = min(
+                                scale_down_factor, preview_height / predicted_crop_h
+                            )
+
+                        if scale_down_factor < 1.0:
+                            display_w = int(display_w * scale_down_factor)
+                            display_h = int(display_h * scale_down_factor)
+                # --- End Constraint ---
+
                 display_w = max(1, display_w)
                 display_h = max(1, display_h)
 
@@ -340,18 +364,25 @@ def perfectfit_print_run(procedure, run_mode, image, drawables, config, data):
                     display_w, display_h, GdkPixbuf.InterpType.BILINEAR
                 )
 
-                # 5. Draw the display-sized thumbnail, centered
                 if display_thumbnail:
                     dest_x = (preview_width - display_w) // 2
                     dest_y = (preview_height - display_h) // 2
                     Gdk.cairo_set_source_pixbuf(cr, display_thumbnail, dest_x, dest_y)
                     cr.paint()
 
-                    # 6. Draw overlays based on the display-sized thumbnail
-                    _draw_overlays(cr, config, display_w, display_h, dest_x, dest_y)
+                    _draw_overlays(
+                        cr,
+                        display_w,
+                        display_h,
+                        dest_x,
+                        dest_y,
+                        x_offset,
+                        y_offset,
+                        target_w_prop,
+                        target_h_prop,
+                    )
 
             elif image is not None:
-                # Fallback if thumbnail creation fails
                 cr.set_source_rgb(0.5, 0.5, 0.5)
                 cr.move_to(0, 0)
                 cr.line_to(preview_width, preview_height)
