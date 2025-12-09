@@ -414,11 +414,10 @@ def perfectfit_print_run(procedure, run_mode, image, drawables, config, data):
             target_height = config.get_property("height")
             unit = config.get_property("unit")
 
-            if target_width == 0 or target_height == 0:
-                info_label.set_text("Width or Height cannot be zero.")
+            if target_width <= 0 or target_height <= 0:
+                info_label.set_text("Width and Height must be positive.")
                 return
 
-            # Use Gimp.Unit.get_factor to get conversion to inches (the base unit)
             conversion_factor = Gimp.Unit.get_factor(unit)
             if conversion_factor == 0:
                 info_label.set_text(
@@ -429,17 +428,36 @@ def perfectfit_print_run(procedure, run_mode, image, drawables, config, data):
             target_width_in = target_width / conversion_factor
             target_height_in = target_height / conversion_factor
 
-            if target_width_in == 0 or target_height_in == 0:
-                info_label.set_text("Dimension in inches is zero.")
+            if target_width_in <= 0 or target_height_in <= 0:
+                info_label.set_text("Dimensions in inches must be positive.")
                 return
 
-            dpi_x = img_width_px / target_width_in
-            dpi_y = img_height_px / target_height_in
-
-            x_offset = adj_x_offset.get_value()
-            y_offset = adj_y_offset.get_value()
+            # Get current scale and offset
             x_scale = adj_x_scale.get_value()
             y_scale = adj_y_scale.get_value()
+            x_offset = adj_x_offset.get_value()
+            y_offset = adj_y_offset.get_value()
+
+            # Calculate the full size of the selected area in pixels
+            full_selection_width_px = img_width_px / x_scale
+            full_selection_height_px = img_height_px / y_scale
+
+            # Determine the crop needed to match the target aspect ratio
+            selection_aspect = full_selection_width_px / full_selection_height_px
+            target_aspect = target_width_in / target_height_in
+
+            if target_aspect > selection_aspect:
+                # Target is wider/shorter aspect than selection, so selection will be letterboxed (cropped top/bottom)
+                cropped_selection_w_px = full_selection_width_px
+                cropped_selection_h_px = cropped_selection_w_px / target_aspect
+            else:
+                # Target is narrower/taller aspect than selection, so selection will be pillarboxed (cropped left/right)
+                cropped_selection_h_px = full_selection_height_px
+                cropped_selection_w_px = cropped_selection_h_px * target_aspect
+
+            # Calculate the DPI needed to make the CROPPED area fit the target print size
+            dpi_x = cropped_selection_w_px / target_width_in
+            dpi_y = cropped_selection_h_px / target_height_in
 
             info_label.set_text(
                 f"X-DPI: {dpi_x:.0f}, Y-DPI: {dpi_y:.0f} | Target: {target_width_in:.2f}x{target_height_in:.2f}in | Scale: {x_scale:.2f}, {y_scale:.2f} | Offset: {x_offset:.2f}, {y_offset:.2f}"
