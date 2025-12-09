@@ -48,7 +48,7 @@ def _get_base_thumbnail(image):
 def _get_zoomed_view(base_thumbnail, x_scale, y_scale):
     """
     Takes a base thumbnail and scale values, and returns a zoomed pixbuf.
-    
+
     Returns a larger pixbuf containing the entire zoomed image.
     Panning/offset will be handled during display.
     """
@@ -57,7 +57,7 @@ def _get_zoomed_view(base_thumbnail, x_scale, y_scale):
 
     thumb_w = base_thumbnail.get_width()
     thumb_h = base_thumbnail.get_height()
-    
+
     # Calculate zoomed dimensions
     zoomed_w = int(thumb_w * x_scale)
     zoomed_h = int(thumb_h * y_scale)
@@ -94,7 +94,7 @@ def _draw_overlays(
 ):
     """
     Draws the dimming overlay and the dashed crop rectangle.
-    
+
     Args:
         cr: Cairo context
         thumb_w, thumb_h: Displayed thumbnail dimensions
@@ -106,8 +106,9 @@ def _draw_overlays(
     x_slop = thumb_w - crop_w
     y_slop = thumb_h - crop_h
 
-    crop_x = dest_x + (x_offset + 0.5) * x_slop
-    crop_y = dest_y + (y_offset + 0.5) * y_slop
+    # Calculate crop position and clamp to ensure it stays on-screen
+    crop_x = max(0, (dest_x + (x_offset + 0.5) * x_slop))
+    crop_y = max(0, (dest_y + (y_offset + 0.5) * y_slop))
 
     cr.set_source_rgba(0, 0, 0, 0.5)
     cr.rectangle(dest_x, dest_y, thumb_w, crop_y - dest_y)
@@ -311,8 +312,10 @@ def perfectfit_print_run(procedure, run_mode, image, drawables, config, data):
 
                 base_aspect = base_w / base_h
                 preview_aspect = preview_width / preview_height
-                target_aspect = target_w_prop / target_h_prop if target_h_prop > 0 else base_aspect
-                
+                target_aspect = (
+                    target_w_prop / target_h_prop if target_h_prop > 0 else base_aspect
+                )
+
                 # Determine crop rectangle size in the BASE (unzoomed) thumbnail
                 if target_aspect > base_aspect:
                     crop_w_in_base = base_w
@@ -320,18 +323,18 @@ def perfectfit_print_run(procedure, run_mode, image, drawables, config, data):
                 else:
                     crop_h_in_base = base_h
                     crop_w_in_base = crop_h_in_base * target_aspect
-                
+
                 # Scale the crop rectangle to fill the preview
                 scale_for_crop_w = preview_width / crop_w_in_base
                 scale_for_crop_h = preview_height / crop_h_in_base
                 display_scale = min(scale_for_crop_w, scale_for_crop_h)
-                
+
                 # Calculate display size for the zoomed thumbnail
                 display_w = int(thumb_w * display_scale)
                 display_h = int(thumb_h * display_scale)
                 display_w = max(1, display_w)
                 display_h = max(1, display_h)
-                
+
                 # Scale the zoomed thumbnail for display
                 display_thumbnail = zoomed_thumbnail.scale_simple(
                     display_w, display_h, GdkPixbuf.InterpType.BILINEAR
@@ -341,33 +344,32 @@ def perfectfit_print_run(procedure, run_mode, image, drawables, config, data):
                     # Crop dimensions in display space
                     crop_w_display = int(crop_w_in_base * display_scale)
                     crop_h_display = int(crop_h_in_base * display_scale)
-                    
-                    # Available space around crop
+
+                    # Available space around crop in the displayed image
                     x_slop_display = display_w - crop_w_display
                     y_slop_display = display_h - crop_h_display
-                    
-                    # Center the image
+
+                    # Available space in preview around the crop
+                    x_preview_space = preview_width - crop_w_display
+                    y_preview_space = preview_height - crop_h_display
+
+                    # Calculate image shift needed to align edges at offset extremes
+                    # Crop moves by x_slop_display within the image (from offset -0.5 to +0.5)
+                    # We want net crop movement in preview to be x_preview_space
+                    # So image must shift by the difference: x_slop_display - x_preview_space
+                    # But offset ranges from -0.5 to +0.5 (range of 1), so we use the full difference
+                    x_shift_needed = x_slop_display - x_preview_space
+                    y_shift_needed = y_slop_display - y_preview_space
+
+                    # Center the image in preview
                     dest_x = (preview_width - display_w) // 2
                     dest_y = (preview_height - display_h) // 2
-                    
-                    # Constrain: ensure crop stays within preview bounds
-                    # Calculate crop position in preview
-                    crop_left = dest_x + (x_offset + 0.5) * x_slop_display
-                    crop_right = crop_left + crop_w_display
-                    crop_top = dest_y + (y_offset + 0.5) * y_slop_display
-                    crop_bottom = crop_top + crop_h_display
-                    
-                    # Shift image if needed to keep crop visible
-                    if crop_left < 0:
-                        dest_x -= int(crop_left)
-                    elif crop_right > preview_width:
-                        dest_x -= int(crop_right - preview_width)
-                    
-                    if crop_top < 0:
-                        dest_y -= int(crop_top)
-                    elif crop_bottom > preview_height:
-                        dest_y -= int(crop_bottom - preview_height)
-                    
+
+                    # Shift image smoothly based on offset
+                    # The crop also moves within the image, so together they create synchronized movement
+                    dest_x -= int(x_offset * x_shift_needed)
+                    dest_y -= int(y_offset * y_shift_needed)
+
                     Gdk.cairo_set_source_pixbuf(cr, display_thumbnail, dest_x, dest_y)
                     cr.paint()
 
