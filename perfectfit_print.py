@@ -420,6 +420,18 @@ def perfectfit_print_run(procedure, run_mode, image, drawables, config, data):
 
         # --- Logic and Signals ---
         def update_calculations(*args):
+            # Check what is stored in the saved settings
+            print("Saved settings check:",
+                config.get_property("width"),
+                config.get_property("height"),
+                config.get_property("unit"),
+                config.get_property("file_format"),
+                config.get_property("x_scale"),
+                config.get_property("y_scale"),
+                config.get_property("x_offset"),
+                config.get_property("y_offset"),
+                config.get_property("lock_scale"))
+            
             if image is None:
                 info_label.set_text("No image open")
                 return
@@ -527,6 +539,9 @@ def perfectfit_print_run(procedure, run_mode, image, drawables, config, data):
         adj_x_scale.connect("value-changed", update_calculations)
         adj_y_scale.connect("value-changed", update_calculations)
 
+        # Test config is loaded properly
+        print("Initial file_format in config:", config.get_property("file_format"))
+        
         dialog_result = dialog.run()
         if not dialog_result:
             dialog.destroy()
@@ -621,20 +636,39 @@ def perfectfit_print_run(procedure, run_mode, image, drawables, config, data):
             # Calculate crop offsets in pixels
             crop_offset_x = (full_selection_width_px - cropped_selection_w_px) * (x_offset + 0.5)
             crop_offset_y = (full_selection_height_px - cropped_selection_h_px) * (y_offset + 0.5)
-            
-            # The crop must be applied to the scaled-down selection, then mapped back to original pixels
-            crop_origin_x_px = crop_offset_x * x_scale
-            crop_origin_y_px = crop_offset_y * y_scale
-            crop_width_px = cropped_selection_w_px * x_scale
-            crop_height_px = cropped_selection_h_px * y_scale
+
+            # 4) Map that selection‑space crop into *image* pixels
+            #    by anchoring the selection itself inside the full image.
+            #
+            # Center the selection in the image first:
+            selection_origin_x = (img_width_px - full_selection_width_px) / 2.0
+            selection_origin_y = (img_height_px - full_selection_height_px) / 2.0
+
+            # Then add the crop offset inside that selection:
+            crop_origin_x_px = selection_origin_x + crop_offset_x
+            crop_origin_y_px = selection_origin_y + crop_offset_y
+
+            # Crop size is just the cropped selection size in *image* pixels.
+            # Do NOT multiply by x_scale / y_scale here:
+            crop_width_px = cropped_selection_w_px
+            crop_height_px = cropped_selection_h_px
+
+            # # The crop must be applied to the scaled-down selection, then mapped back to original pixels
+            # crop_origin_x_px = crop_offset_x * x_scale
+            # crop_origin_y_px = crop_offset_y * y_scale
+            # crop_width_px = cropped_selection_w_px * x_scale
+            # crop_height_px = cropped_selection_h_px * y_scale
             
             proc = Gimp.get_pdb().lookup_procedure('gimp-image-crop')
             crop_config = proc.create_config()
+            # # DEBUG: list available properties once
+            # for pspec in crop_config.list_properties():
+            #     print(pspec.name)
             crop_config.set_property('image', new_image)
             crop_config.set_property('new-width', crop_width_px)
             crop_config.set_property('new-height', crop_height_px)
-            crop_config.set_property('offset-x', crop_origin_x_px)
-            crop_config.set_property('offset-y', crop_origin_y_px)
+            crop_config.set_property('offx', crop_origin_x_px)
+            crop_config.set_property('offy', crop_origin_y_px)
             proc.run(crop_config)
 
 
@@ -645,9 +679,16 @@ def perfectfit_print_run(procedure, run_mode, image, drawables, config, data):
             # Use the appropriate save procedure based on format
             proc = Gimp.get_pdb().lookup_procedure('gimp-file-save')
             save_config = proc.create_config()
+            # DEBUG: list available properties once
+            print("Save procedure properties:")
+            for pspec in save_config.list_properties():
+                print(pspec.name, pspec.value_type.name)
+            save_config.set_property('run-mode', Gimp.RunMode.NONINTERACTIVE)
             save_config.set_property('image', new_image)
-            save_config.set_property('drawables', new_image.list_drawables())
             save_config.set_property('file', gfile)
+            # For now, let GIMP create default export options
+            # options = Gimp.ExportOptions.newv(0, None)
+            save_config.set_property('options', None)
             proc.run(save_config)
 
             # 5. Clean up the duplicated image
