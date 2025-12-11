@@ -12,6 +12,7 @@ from gi.repository import GObject
 from gi.repository import GLib
 from gi.repository import Gtk
 from gi.repository import Gdk, GdkPixbuf  # Import Gdk
+from gi.repository import Gio
 
 import sys
 
@@ -169,6 +170,22 @@ def perfectfit_print_run(procedure, run_mode, image, drawables, config, data):
         w_unit = GimpUi.prop_unit_combo_box_new(config, "unit")
         label.set_mnemonic_widget(w_unit)
         settings_grid.attach(w_unit, 5, 0, 1, 1)
+
+        # File Format
+        label = Gtk.Label.new_with_mnemonic("F_ormat:")
+        settings_grid.attach(label, 6, 0, 1, 1)
+        format_store = Gtk.ListStore(str)
+        for item in ["PNG", "JPEG", "TIFF"]:
+            format_store.append([item])
+        w_format = GimpUi.prop_string_combo_box_new(
+            config,
+            "file_format",
+            format_store,
+            0,
+            0
+        )
+        label.set_mnemonic_widget(w_format)
+        settings_grid.attach(w_format, 7, 0, 1, 1)
 
         # Middle preview and scrollbars using a Gtk.Grid
         # Grid layout:
@@ -510,22 +527,161 @@ def perfectfit_print_run(procedure, run_mode, image, drawables, config, data):
         adj_x_scale.connect("value-changed", update_calculations)
         adj_y_scale.connect("value-changed", update_calculations)
 
-        if not dialog.run():
+        dialog_result = dialog.run()
+        if not dialog_result:
             dialog.destroy()
             return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, None)
-        else:
+
+        # Full export logic for INTERACTIVE mode
+        try:
+            file_format = config.get_property("file_format")
+            extension = file_format.lower()
+
+            # Create a file chooser dialog
+            file_chooser = Gtk.FileChooserDialog(
+                title=f"Export as {file_format}",
+                parent=dialog,
+                action=Gtk.FileChooserAction.SAVE,
+            )
+            file_chooser.add_buttons(
+                "_Cancel", Gtk.ResponseType.CANCEL, f"_Export", Gtk.ResponseType.OK
+            )
+            file_chooser.set_do_overwrite_confirmation(True)
+            
+            # Suggest a filename
+            suggested_name = "untitled"
+            image_file = image.get_file()
+            if image_file:
+                path = image_file.get_path()
+                if path:
+                    # Get basename, then strip extension
+                    base_name = path.split('\\')[-1].split('/')[-1]
+                    suggested_name = base_name.rsplit('.', 1)[0]
+            file_chooser.set_current_name(f"{suggested_name}-perfectfit.{extension}")
+
+
+            # Run the file chooser
+            file_response = file_chooser.run()
+            save_path = None
+            if file_response == Gtk.ResponseType.OK:
+                save_path = file_chooser.get_filename()
+
+            file_chooser.destroy()
             dialog.destroy()
 
-    # Get properties after the dialog has run or from the passed-in config
+            if not save_path:
+                return procedure.new_return_values(Gimp.PDBStatusType.CANCEL, None)
+
+            # --- Start non-destructive export ---
+            
+            # 1. Duplicate the image
+            new_image = image.duplicate()
+
+            # Ensure the new image is usable
+            if not new_image:
+                Gimp.message("Failed to duplicate image.")
+                return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, None)
+
+            # These calculations are already done once in update_calculations, but we redo them
+            # here to ensure we have the absolute final values.
+            img_width_px = new_image.get_width()
+            img_height_px = new_image.get_height()
+            target_width = config.get_property("width")
+            target_height = config.get_property("height")
+            unit = config.get_property("unit")
+            x_scale = config.get_property("x_scale")
+            y_scale = config.get_property("y_scale")
+            x_offset = config.get_property("x_offset")
+            y_offset = config.get_property("y_offset")
+
+            conversion_factor = Gimp.Unit.get_factor(unit)
+            target_width_in = target_width / conversion_factor
+            target_height_in = target_height / conversion_factor
+
+            full_selection_width_px = img_width_px / x_scale
+            full_selection_height_px = img_height_px / y_scale
+
+            selection_aspect = full_selection_width_px / full_selection_height_px
+            target_aspect = target_width_in / target_height_in
+
+            if target_aspect > selection_aspect:
+                cropped_selection_w_px = full_selection_width_px
+                cropped_selection_h_px = cropped_selection_w_px / target_aspect
+            else:
+                cropped_selection_h_px = full_selection_height_px
+                cropped_selection_w_px = cropped_selection_h_px * target_aspect
+            
+            dpi_x = cropped_selection_w_px / target_width_in
+            dpi_y = cropped_selection_h_px / target_height_in
+
+            # 2. Set the resolution
+            new_image.set_resolution(dpi_x, dpi_y)
+
+            # 3. Crop the image
+            # Calculate crop offsets in pixels
+            crop_offset_x = (full_selection_width_px - cropped_selection_w_px) * (x_offset + 0.5)
+            crop_offset_y = (full_selection_height_px - cropped_selection_h_px) * (y_offset + 0.5)
+            
+            # The crop must be applied to the scaled-down selection, then mapped back to original pixels
+            crop_origin_x_px = crop_offset_x * x_scale
+            crop_origin_y_px = crop_offset_y * y_scale
+            crop_width_px = cropped_selection_w_px * x_scale
+            crop_height_px = cropped_selection_h_px * y_scale
+            
+            proc = Gimp.get_pdb().lookup_procedure('gimp-image-crop')
+            crop_config = proc.create_config()
+            crop_config.set_property('image', new_image)
+            crop_config.set_property('new-width', crop_width_px)
+            crop_config.set_property('new-height', crop_height_px)
+            crop_config.set_property('offset-x', crop_origin_x_px)
+            crop_config.set_property('offset-y', crop_origin_y_px)
+            proc.run(crop_config)
+
+
+            # 4. Save the file
+            # GIMP PDB procedures require a GFile object for the path
+            gfile = Gio.file_new_for_path(save_path)
+            
+            # Use the appropriate save procedure based on format
+            proc = Gimp.get_pdb().lookup_procedure('gimp-file-save')
+            save_config = proc.create_config()
+            save_config.set_property('image', new_image)
+            save_config.set_property('drawables', new_image.list_drawables())
+            save_config.set_property('file', gfile)
+            proc.run(save_config)
+
+            # 5. Clean up the duplicated image
+            proc = Gimp.get_pdb().lookup_procedure('gimp-image-delete')
+            delete_config = proc.create_config()
+            delete_config.set_property('image', new_image)
+            proc.run(delete_config)
+            
+            Gimp.message("Done!")
+        
+        except Exception as e:
+            import traceback
+            Gimp.message(f"An error occurred during export:\n\n{e}\n\n{traceback.format_exc()}")
+            # Attempt to clean up the duplicated image if it exists
+            if 'new_image' in locals() and new_image and new_image.is_valid():
+                proc = Gimp.get_pdb().lookup_procedure('gimp-image-delete')
+                delete_config = proc.create_config()
+                delete_config.set_property('image', new_image)
+                proc.run(delete_config)
+
+            # Destroy dialog if it's still around
+            if 'dialog' in locals() and dialog:
+                dialog.destroy()
+            
+            return procedure.new_return_values(Gimp.PDBStatusType.EXECUTION_ERROR, None)
+
+        return procedure.new_return_values(Gimp.PDBStatusType.SUCCESS, None)
+
+    # NON-INTERACTIVE mode (for scripting)
+    # This part is not fully implemented for file export yet
     width = config.get_property("width")
     height = config.get_property("height")
     unit = config.get_property("unit")
-
-    # For now, just print the values.
-    print(
-        f"Dialog values: Width: {width}, Height: {height}, Unit: {Gimp.Unit.get_symbol(unit)}"
-    )
-    print(f"Preparing to crop to {width}x{height}")
+    print(f"Non-interactive run: {width}x{height} {Gimp.Unit.get_symbol(unit)}")
 
     return procedure.new_return_values(Gimp.PDBStatusType.SUCCESS, None)
 
@@ -627,6 +783,14 @@ class PerfectFitPrint(Gimp.PlugIn):
                 "Lock Scale",
                 "Lock X and Y scale",
                 True,
+                GObject.ParamFlags.READWRITE,
+            )
+
+            procedure.add_string_argument(
+                "file_format",
+                "File Format",
+                "Export file format (PNG, JPEG, TIFF)",
+                "PNG",
                 GObject.ParamFlags.READWRITE,
             )
 
