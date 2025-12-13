@@ -24,5 +24,8 @@ Thumbs.db
 *~
 ._*
 
+# Test files
+test-files/
+
 # AI instructions
 GEMINI.md
